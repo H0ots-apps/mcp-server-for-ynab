@@ -65,20 +65,34 @@ export async function fetchUpstreamAuthToken({
 	const resp = await fetch(upstream_url, {
 		body: new URLSearchParams({ client_id, client_secret, code, redirect_uri }).toString(),
 		headers: {
+			Accept: "application/json",
 			"Content-Type": "application/x-www-form-urlencoded",
 		},
 		method: "POST",
 	});
-	if (!resp.ok) {
-		console.log(await resp.text());
-		return [null, new Response("Failed to fetch access token", { status: 500 })];
+	const text = await resp.text();
+	let body: Record<string, string> = {};
+	try {
+		body = JSON.parse(text);
+	} catch {
+		body = Object.fromEntries(new URLSearchParams(text));
 	}
-	const body = await resp.formData();
-	const accessToken = body.get("access_token") as string;
-	if (!accessToken) {
-		return [null, new Response("Missing access token", { status: 400 })];
+	if (!resp.ok || !body.access_token) {
+		// GitHub reports problems like a wrong client secret or a callback URL
+		// mismatch here. Show the reason (never any secret) so setup is debuggable.
+		const reason = body.error_description || body.error || `HTTP ${resp.status}`;
+		console.error("GitHub token exchange failed:", resp.status, body.error, body.error_description);
+		return [
+			null,
+			new Response(
+				`Failed to fetch access token from GitHub: ${reason}\n\n` +
+					"Check that the GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET secrets in Cloudflare match your GitHub OAuth app, " +
+					"and that its callback URL is this server's address plus /callback.",
+				{ status: 502, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+			),
+		];
 	}
-	return [accessToken, null];
+	return [body.access_token, null];
 }
 
 // Context from the auth process, encrypted & stored in the auth token
