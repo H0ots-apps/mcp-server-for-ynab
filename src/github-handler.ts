@@ -17,6 +17,13 @@ import {
 
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
 
+// Simple landing page so the bare URL doesn't look broken.
+app.get("/", (c) =>
+	c.html(
+		`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MCP Server for YNAB</title><body style="font-family:system-ui;max-width:34rem;margin:4rem auto;padding:0 1rem;line-height:1.5"><h1>MCP Server for YNAB</h1><p>This server is running. To use it, add <code>${new URL("/mcp", c.req.url).href}</code> as a custom connector in Claude (Settings → Connectors → Add custom connector).</p><p style="color:#666;font-size:.9em">Not affiliated with or endorsed by YNAB. <a href="https://github.com/ryanlbowen/mcp-server-for-ynab">Source code</a></p></body>`,
+	),
+);
+
 app.get("/authorize", async (c) => {
 	const oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
 	const { clientId } = oauthReqInfo;

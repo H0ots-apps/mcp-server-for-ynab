@@ -11,7 +11,7 @@
   "vars": {
     // The URL MCP clients connect to. After your first deploy, set this to
     // https://mcp-server-for-ynab.<your-subdomain>.workers.dev/mcp and deploy again.
-    "MCP_RESOURCE": "http://localhost:8788/mcp",
+    "MCP_RESOURCE": "https://mcp-server-for-ynab.aged-firefly-dae3.workers.dev/mcp",
     // Comma-separated GitHub usernames allowed to sign in. Anyone else is refused.
     // Example: "octocat" or "octocat,partnername"
     "ALLOWED_GITHUB_USERS": "ryanlbowen",
