@@ -14,7 +14,7 @@
     "MCP_RESOURCE": "http://localhost:8788/mcp",
     // Comma-separated GitHub usernames allowed to sign in. Anyone else is refused.
     // Example: "octocat" or "octocat,partnername"
-    "ALLOWED_GITHUB_USERS": "",
+    "ALLOWED_GITHUB_USERS": "ryanlbowen",
   },
   /**
    * Secrets (never put these in this file). Set each one with:
@@ -26,7 +26,7 @@
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "<Add-KV-ID>"
+      "id": "2d5593923ab2472c87e91776b277a9c6"
     }
   ],
   "observability": {
