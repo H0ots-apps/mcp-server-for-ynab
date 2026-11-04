@@ -1,0 +1,46 @@
+/**
+ * Wrangler configuration for MCP Server for YNAB.
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-server-for-ynab",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    // The URL MCP clients connect to. After your first deploy, set this to
+    // https://mcp-server-for-ynab.<your-subdomain>.workers.dev/mcp and deploy again.
+    "MCP_RESOURCE": "http://localhost:8788/mcp",
+    // Comma-separated GitHub usernames allowed to sign in. Anyone else is refused.
+    // Example: "octocat" or "octocat,partnername"
+    "ALLOWED_GITHUB_USERS": "",
+  },
+  /**
+   * Secrets (never put these in this file). Set each one with:
+   *   npx wrangler secret put GITHUB_CLIENT_ID
+   *   npx wrangler secret put GITHUB_CLIENT_SECRET
+   *   npx wrangler secret put COOKIE_ENCRYPTION_KEY
+   *   npx wrangler secret put YNAB_ACCESS_TOKEN
+   */
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "<Add-KV-ID>"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "dev": {
+    "port": 8788
+  },
+  "secrets": {
+    "required": [
+      "GITHUB_CLIENT_ID",
+      "GITHUB_CLIENT_SECRET",
+      "COOKIE_ENCRYPTION_KEY",
+      "YNAB_ACCESS_TOKEN"
+    ]
+  }
+}

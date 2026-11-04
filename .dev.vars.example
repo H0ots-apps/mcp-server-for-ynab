@@ -1,0 +1,5 @@
+GITHUB_CLIENT_ID=<your local-dev GitHub OAuth app client id>
+GITHUB_CLIENT_SECRET=<your local-dev GitHub OAuth app client secret>
+COOKIE_ENCRYPTION_KEY=<random string, e.g. from: openssl rand -hex 32>
+YNAB_ACCESS_TOKEN=<your YNAB personal access token>
+ALLOWED_GITHUB_USERS=<your GitHub username>
