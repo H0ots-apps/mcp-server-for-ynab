@@ -713,12 +713,14 @@ export function registerYnabTools(server: McpServer, ynab: YnabClient) {
 		{
 			title: "Assign money to a category",
 			description:
-				"Set the amount assigned (budgeted) to a category for a month. This sets the total for the month, not an increment: to add $50 to a category with $100 assigned, pass 150.",
+				"Set the amount assigned (budgeted) to a category for a month. This sets the total for the month, not an increment: to add $50 to a category with $100 assigned, pass 150. Negative totals are allowed. To move money between categories, lower the source's total and raise the destination's by the same amount (two calls).",
 			inputSchema: z.object({
 				plan_id: planId,
 				month: monthParam,
 				category: z.string().describe("Category name or ID"),
-				assigned: z.number().min(0).describe("New total assigned for the month, e.g. 150"),
+				assigned: z
+					.number()
+					.describe("New total assigned for the month, e.g. 150. Can be negative, e.g. -50."),
 			}),
 			annotations: WRITE,
 		},
