@@ -67,9 +67,24 @@ export async function fetchUpstreamAuthToken({
 		headers: {
 			Accept: "application/json",
 			"Content-Type": "application/x-www-form-urlencoded",
+			// Workers send no User-Agent by default; anonymous requests from shared
+			// Cloudflare IPs are more likely to be throttled by GitHub (HTTP 429).
+			"User-Agent": "mcp-server-for-ynab (Cloudflare Worker)",
 		},
 		method: "POST",
 	});
+	if (resp.status === 429) {
+		const retryAfter = resp.headers.get("Retry-After");
+		console.error("GitHub token exchange rate limited. Retry-After:", retryAfter);
+		return [
+			null,
+			new Response(
+				`GitHub is rate limiting sign-in requests (HTTP 429)${retryAfter ? `; it asks to wait ${retryAfter} seconds` : ""}. ` +
+					"Wait a few minutes, then connect again. Your secrets are not the problem.",
+				{ status: 503, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+			),
+		];
+	}
 	const text = await resp.text();
 	let body: Record<string, string> = {};
 	try {
