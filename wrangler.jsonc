@@ -4,17 +4,17 @@
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "mcp-server-for-ynab",
+  "name": "ynab-mcp",
   "main": "src/index.ts",
   "compatibility_date": "2025-03-10",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     // The URL MCP clients connect to. After your first deploy, set this to
     // https://mcp-server-for-ynab.<your-subdomain>.workers.dev/mcp and deploy again.
-    "MCP_RESOURCE": "https://mcp-server-for-ynab.aged-firefly-dae3.workers.dev/mcp",
+    "MCP_RESOURCE": "https://ynab-mcp.h0ots.workers.dev/mcp",
     // Comma-separated GitHub usernames allowed to sign in. Anyone else is refused.
     // Example: "octocat" or "octocat,partnername"
-    "ALLOWED_GITHUB_USERS": "ryanlbowen",
+    "ALLOWED_GITHUB_USERS": "H0ots-apps",
   },
   /**
    * Secrets (never put these in this file). Set each one with:
@@ -26,7 +26,7 @@
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "2d5593923ab2472c87e91776b277a9c6"
+      "id": "ed2eaa3dd77b41baa645ec8c943791b7"
     }
   ],
   "observability": {
