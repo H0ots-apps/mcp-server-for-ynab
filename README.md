@@ -20,6 +20,11 @@ Talk to your YNAB plan from Claude. This is a small server you deploy to **your 
 | `bulk_update_transactions` | Approve, categorize, clear or flag many transactions at once |
 | `delete_transaction` | Delete a transaction |
 | `assign_to_category` | Set how much is assigned to a category for a month |
+| `get_month_history` | Income, assigned, activity, Ready to Assign and age of money for each month in a range, with averages |
+| `list_scheduled_transactions` | Scheduled (recurring or future) transactions, soonest first; filter by days ahead, account or payee |
+| `create_scheduled_transaction` | Add a recurring or one-time future transaction, or a scheduled transfer between accounts |
+| `update_scheduled_transaction` | Change fields on a scheduled transaction (not splits) |
+| `delete_scheduled_transaction` | Delete a scheduled transaction |
 
 Accounts and categories can be given by name ("Checking", "Groceries", "Everyday: Groceries"), so you can just say *"Add $42.18 at Costco yesterday to Groceries on my Visa."*
 

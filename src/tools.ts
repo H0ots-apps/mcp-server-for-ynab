@@ -2,12 +2,15 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
 	fromMilliunits,
+	SCHEDULED_FREQUENCIES,
+	type ScheduledTransactionWrite,
 	toMilliunits,
 	type TransactionWrite,
 	type YnabAccount,
 	type YnabCategory,
 	type YnabClient,
 	YnabError,
+	type YnabScheduledTransaction,
 	type YnabTransaction,
 } from "./ynab";
 
@@ -722,6 +725,314 @@ export function registerYnabTools(server: McpServer, ynab: YnabClient) {
 				toMilliunits(assigned),
 			);
 			return { updated: simplifyCategory({ ...updated, group: cat.group }) };
+		}),
+	);
+
+	registerMonthHistoryTools(server, ynab);
+	registerScheduledTransactionTools(server, ynab);
+}
+
+// ---------- month history ----------
+
+const yearMonth = z.string().regex(/^\d{4}-\d{2}$/, "Use YYYY-MM");
+
+/** First day of the current month (UTC) as YYYY-MM-01. */
+function currentMonthStart() {
+	return `${new Date().toISOString().slice(0, 7)}-01`;
+}
+
+/** Shift a YYYY-MM-01 date by a number of months. */
+function addMonths(monthStart: string, delta: number) {
+	const [y, m] = monthStart.split("-").map(Number);
+	const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+	return d.toISOString().slice(0, 10);
+}
+
+function registerMonthHistoryTools(server: McpServer, ynab: YnabClient) {
+	server.registerTool(
+		"get_month_history",
+		{
+			title: "Month history",
+			description:
+				"Plan totals for each month in a range (default: the last 12 months, including this one): income, assigned, activity (spending, negative), Ready to Assign and age of money, plus monthly averages. Use for trends like 'how has my spending changed this year?'. For one month in detail, use get_plan_overview.",
+			inputSchema: z.object({
+				plan_id: planId,
+				since_month: yearMonth.optional().describe("First month, YYYY-MM (default: 11 months before until_month)"),
+				until_month: yearMonth.optional().describe("Last month, YYYY-MM (default: the current month)"),
+			}),
+			annotations: READ,
+		},
+		wrap(async ({ plan_id, since_month, until_month }) => {
+			const current = currentMonthStart();
+			const until = until_month ? `${until_month}-01` : current;
+			const since = since_month ? `${since_month}-01` : addMonths(until, -11);
+			if (since > until) {
+				throw new ToolInputError(`since_month (${since_month}) is after until_month (${until.slice(0, 7)}).`);
+			}
+
+			const months = (await ynab.listMonths(resolvePlan(plan_id)))
+				.filter((m) => !m.deleted && m.month >= since && m.month <= until)
+				.sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
+
+			// The current month is still in progress, so leave it out of the averages.
+			const complete = months.filter((m) => m.month < current);
+			const average = (pick: (m: (typeof months)[number]) => number) =>
+				complete.length
+					? money(Math.round(complete.reduce((sum, m) => sum + pick(m), 0) / complete.length))
+					: null;
+
+			return {
+				since: since.slice(0, 7),
+				until: until.slice(0, 7),
+				averages: {
+					months_counted: complete.length,
+					note: "Complete months only; the current month is excluded.",
+					income: average((m) => m.income),
+					assigned: average((m) => m.budgeted),
+					activity: average((m) => m.activity),
+				},
+				months: months.map((m) => ({
+					month: m.month.slice(0, 7),
+					...(m.month === current ? { in_progress: true } : {}),
+					income: money(m.income),
+					assigned: money(m.budgeted),
+					activity: money(m.activity),
+					ready_to_assign: money(m.to_be_budgeted),
+					age_of_money_days: m.age_of_money ?? null,
+					...(m.note ? { note: m.note } : {}),
+				})),
+			};
+		}),
+	);
+}
+
+// ---------- scheduled transactions ----------
+
+const frequency = z
+	.enum(SCHEDULED_FREQUENCIES)
+	.describe('How often it repeats. "never" means a one-time future transaction.');
+
+function daysFromNow(days: number) {
+	return new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+function simplifyScheduled(s: YnabScheduledTransaction) {
+	const splits = (s.subtransactions ?? []).filter((x) => !x.deleted);
+	return {
+		id: s.id,
+		next_date: s.date_next,
+		first_date: s.date_first,
+		frequency: s.frequency,
+		amount: money(s.amount),
+		payee: s.payee_name ?? null,
+		category: s.category_name ?? null,
+		account: s.account_name ?? s.account_id,
+		memo: s.memo ?? null,
+		flag: s.flag_color ?? null,
+		...(s.transfer_account_id ? { transfer_account_id: s.transfer_account_id } : {}),
+		...(splits.length
+			? {
+					splits: splits.map((x) => ({
+						amount: money(x.amount),
+						category: x.category_name ?? null,
+						payee: x.payee_name ?? null,
+						memo: x.memo ?? null,
+					})),
+				}
+			: {}),
+	};
+}
+
+function registerScheduledTransactionTools(server: McpServer, ynab: YnabClient) {
+	server.registerTool(
+		"list_scheduled_transactions",
+		{
+			title: "List scheduled transactions",
+			description:
+				"List scheduled (recurring or future-dated) transactions with their next date and frequency, soonest first. Use days_ahead for questions like 'what bills are due in the next two weeks?'. Each schedule appears once, at its next date, even if it repeats within the window. Amounts are negative for outflows.",
+			inputSchema: z.object({
+				plan_id: planId,
+				days_ahead: z
+					.number()
+					.int()
+					.min(0)
+					.max(1830)
+					.optional()
+					.describe("Only schedules whose next date is within this many days from today"),
+				account: z.string().optional().describe("Only this account (name or ID)"),
+				payee_search: z.string().optional().describe("Only schedules whose payee name contains this"),
+			}),
+			annotations: READ,
+		},
+		wrap(async ({ plan_id, days_ahead, account, payee_search }) => {
+			const plan = resolvePlan(plan_id);
+			const accountId = account ? (await new Lookup(ynab, plan).account(account)).id : undefined;
+			const cutoff = days_ahead !== undefined ? daysFromNow(days_ahead) : undefined;
+			const q = payee_search ? norm(payee_search) : null;
+
+			const rows = (await ynab.listScheduledTransactions(plan))
+				.filter((s) => !s.deleted)
+				.filter((s) => !accountId || s.account_id === accountId)
+				.filter((s) => !cutoff || s.date_next <= cutoff)
+				.filter((s) => !q || norm(s.payee_name ?? "").includes(q))
+				.sort((a, b) => (a.date_next < b.date_next ? -1 : a.date_next > b.date_next ? 1 : 0));
+
+			return {
+				count: rows.length,
+				...(cutoff ? { through: cutoff } : {}),
+				scheduled_transactions: rows.map(simplifyScheduled),
+			};
+		}),
+	);
+
+	server.registerTool(
+		"create_scheduled_transaction",
+		{
+			title: "Add a scheduled transaction",
+			description:
+				"Add a recurring or one-time future transaction. Give the amount as a positive number with direction. For a scheduled transfer between accounts, use transfer_to_account instead of payee_name. YNAB's API can't create split scheduled transactions.",
+			inputSchema: z.object({
+				plan_id: planId,
+				account: z.string().describe("Account name or ID"),
+				first_date: isoDate.describe("First occurrence, YYYY-MM-DD. Must be in the future, at most 5 years ahead."),
+				frequency,
+				amount: z.number().positive().describe("Amount as a positive number, e.g. 12.34"),
+				direction: direction.default("outflow"),
+				payee_name: z
+					.string()
+					.max(200)
+					.optional()
+					.describe("Payee name. YNAB matches existing payees or creates a new one."),
+				transfer_to_account: z
+					.string()
+					.optional()
+					.describe("Make this a transfer to this account (name or ID) instead of using payee_name"),
+				category: z.string().optional().describe("Category name or ID. Omit to leave uncategorized."),
+				memo: z.string().max(500).optional(),
+				flag_color: flagColor.optional(),
+			}),
+			annotations: WRITE,
+		},
+		wrap(async (args) => {
+			const plan = resolvePlan(args.plan_id);
+			const lookup = new Lookup(ynab, plan);
+			if (args.transfer_to_account && args.payee_name) {
+				throw new ToolInputError("Pass payee_name or transfer_to_account, not both.");
+			}
+
+			const from = await lookup.account(args.account);
+			const write: ScheduledTransactionWrite = {
+				account_id: from.id,
+				date: args.first_date,
+				frequency: args.frequency,
+				amount: signedMilliunits(args.amount, args.direction),
+				memo: args.memo ?? null,
+				...(args.flag_color !== undefined ? { flag_color: args.flag_color } : {}),
+			};
+
+			if (args.transfer_to_account) {
+				const to = await lookup.account(args.transfer_to_account);
+				if (to.id === from.id) throw new ToolInputError("Can't transfer an account to itself.");
+				if (!to.transfer_payee_id) {
+					throw new ToolInputError(`YNAB didn't return a transfer payee for "${to.name}".`);
+				}
+				write.payee_id = to.transfer_payee_id;
+			} else {
+				write.payee_name = args.payee_name ?? null;
+			}
+			if (args.category) write.category_id = (await lookup.category(args.category)).id;
+
+			const created = await ynab.createScheduledTransaction(plan, write);
+			return { created: simplifyScheduled(created) };
+		}),
+	);
+
+	server.registerTool(
+		"update_scheduled_transaction",
+		{
+			title: "Edit a scheduled transaction",
+			description:
+				"Change fields on one scheduled transaction. Only the fields you pass are changed. To change the amount, pass amount and direction together. Split scheduled transactions must be edited in YNAB.",
+			inputSchema: z.object({
+				plan_id: planId,
+				scheduled_transaction_id: z.string(),
+				account: z.string().optional().describe("Move to this account (name or ID)"),
+				next_date: isoDate
+					.optional()
+					.describe("New next occurrence, YYYY-MM-DD. Must be in the future, at most 5 years ahead."),
+				frequency: frequency.optional(),
+				amount: z.number().positive().optional().describe("New amount as a positive number"),
+				direction: direction.optional().describe("Required with amount: outflow (spending) or inflow"),
+				payee_name: z.string().max(200).optional(),
+				category: z
+					.string()
+					.nullable()
+					.optional()
+					.describe("Category name or ID, or null to make it uncategorized"),
+				memo: z.string().max(500).nullable().optional(),
+				flag_color: flagColor.optional(),
+			}),
+			annotations: WRITE,
+		},
+		wrap(async (args) => {
+			const plan = resolvePlan(args.plan_id);
+			const lookup = new Lookup(ynab, plan);
+			const existing = await ynab.getScheduledTransaction(plan, args.scheduled_transaction_id);
+
+			if (existing.subtransactions?.some((s) => !s.deleted)) {
+				throw new ToolInputError(
+					"This scheduled transaction is split. YNAB's API doesn't support split scheduled transactions, so saving it from here could drop the splits. Edit it in YNAB instead.",
+				);
+			}
+			if (args.amount !== undefined && !args.direction) {
+				throw new ToolInputError(
+					`Pass direction ("outflow" or "inflow") with the amount. The current amount is ${fromMilliunits(existing.amount)}.`,
+				);
+			}
+
+			// YNAB's PUT replaces the scheduled transaction, so start from the existing values.
+			const write: ScheduledTransactionWrite = {
+				account_id: existing.account_id,
+				date: existing.date_next,
+				frequency: existing.frequency,
+				amount: existing.amount,
+				payee_id: existing.payee_id ?? null,
+				category_id: existing.category_id ?? null,
+				memo: existing.memo ?? null,
+				flag_color: existing.flag_color ?? null,
+			};
+
+			if (args.account) write.account_id = (await lookup.account(args.account)).id;
+			if (args.next_date) write.date = args.next_date;
+			if (args.frequency) write.frequency = args.frequency;
+			if (args.amount !== undefined && args.direction)
+				write.amount = signedMilliunits(args.amount, args.direction);
+			if (args.payee_name !== undefined) {
+				write.payee_id = null;
+				write.payee_name = args.payee_name;
+			}
+			if (args.category !== undefined)
+				write.category_id = args.category === null ? null : (await lookup.category(args.category)).id;
+			if (args.memo !== undefined) write.memo = args.memo;
+			if (args.flag_color !== undefined) write.flag_color = args.flag_color;
+
+			const updated = await ynab.updateScheduledTransaction(plan, args.scheduled_transaction_id, write);
+			return { updated: simplifyScheduled(updated) };
+		}),
+	);
+
+	server.registerTool(
+		"delete_scheduled_transaction",
+		{
+			title: "Delete a scheduled transaction",
+			description:
+				"Delete one scheduled transaction, stopping all future occurrences. This cannot be undone from here, so confirm with the user first.",
+			inputSchema: z.object({ plan_id: planId, scheduled_transaction_id: z.string() }),
+			annotations: DESTRUCTIVE,
+		},
+		wrap(async ({ plan_id, scheduled_transaction_id }) => {
+			const deleted = await ynab.deleteScheduledTransaction(resolvePlan(plan_id), scheduled_transaction_id);
+			return { deleted: simplifyScheduled(deleted) };
 		}),
 	);
 }

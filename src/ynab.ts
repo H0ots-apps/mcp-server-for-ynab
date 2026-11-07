@@ -32,6 +32,7 @@ export interface YnabAccount {
 	uncleared_balance: Milliunits;
 	deleted: boolean;
 	note?: string | null;
+	transfer_payee_id?: string | null;
 }
 
 export interface YnabCategory {
@@ -106,6 +107,68 @@ export interface YnabMonth {
 	to_be_budgeted: Milliunits;
 	age_of_money?: number | null;
 	categories: YnabCategory[];
+}
+
+/** One row from GET /months: plan-level totals only, no categories. */
+export interface YnabMonthSummary {
+	month: string;
+	note?: string | null;
+	income: Milliunits;
+	budgeted: Milliunits;
+	activity: Milliunits;
+	to_be_budgeted: Milliunits;
+	age_of_money?: number | null;
+	deleted: boolean;
+}
+
+export const SCHEDULED_FREQUENCIES = [
+	"never",
+	"daily",
+	"weekly",
+	"everyOtherWeek",
+	"twiceAMonth",
+	"every4Weeks",
+	"monthly",
+	"everyOtherMonth",
+	"every3Months",
+	"every4Months",
+	"twiceAYear",
+	"yearly",
+	"everyOtherYear",
+] as const;
+
+export type ScheduledFrequency = (typeof SCHEDULED_FREQUENCIES)[number];
+
+export interface YnabScheduledTransaction {
+	id: string;
+	date_first: string;
+	date_next: string;
+	frequency: ScheduledFrequency;
+	amount: Milliunits;
+	memo?: string | null;
+	flag_color?: string | null;
+	account_id: string;
+	account_name?: string;
+	payee_id?: string | null;
+	payee_name?: string | null;
+	category_id?: string | null;
+	category_name?: string | null;
+	transfer_account_id?: string | null;
+	deleted: boolean;
+	subtransactions?: YnabSubTransaction[];
+}
+
+/** The fields YNAB accepts when creating or replacing a scheduled transaction. Splits aren't supported. */
+export interface ScheduledTransactionWrite {
+	account_id: string;
+	date: string;
+	amount: Milliunits;
+	frequency: ScheduledFrequency;
+	payee_id?: string | null;
+	payee_name?: string | null;
+	category_id?: string | null;
+	memo?: string | null;
+	flag_color?: string | null;
 }
 
 /** The fields YNAB accepts when creating or updating a transaction. */
@@ -309,6 +372,49 @@ export class YnabClient {
 			{ category: { budgeted } },
 		);
 		return data.category as YnabCategory;
+	}
+
+	// ----- Month history -----
+
+	async listMonths(planId: string) {
+		const data = await this.request<any>("GET", `${this.plan(planId)}/months`);
+		return (data.months ?? []) as YnabMonthSummary[];
+	}
+
+	// ----- Scheduled transactions -----
+
+	private scheduledPath(planId: string, id?: string) {
+		const base = `${this.plan(planId)}/scheduled_transactions`;
+		return id ? `${base}/${encodeURIComponent(id)}` : base;
+	}
+
+	async listScheduledTransactions(planId: string) {
+		const data = await this.request<any>("GET", this.scheduledPath(planId));
+		return (data.scheduled_transactions ?? []) as YnabScheduledTransaction[];
+	}
+
+	async getScheduledTransaction(planId: string, id: string) {
+		const data = await this.request<any>("GET", this.scheduledPath(planId, id));
+		return data.scheduled_transaction as YnabScheduledTransaction;
+	}
+
+	async createScheduledTransaction(planId: string, write: ScheduledTransactionWrite) {
+		const data = await this.request<any>("POST", this.scheduledPath(planId), {
+			scheduled_transaction: write,
+		});
+		return data.scheduled_transaction as YnabScheduledTransaction;
+	}
+
+	async updateScheduledTransaction(planId: string, id: string, write: ScheduledTransactionWrite) {
+		const data = await this.request<any>("PUT", this.scheduledPath(planId, id), {
+			scheduled_transaction: write,
+		});
+		return data.scheduled_transaction as YnabScheduledTransaction;
+	}
+
+	async deleteScheduledTransaction(planId: string, id: string) {
+		const data = await this.request<any>("DELETE", this.scheduledPath(planId, id));
+		return data.scheduled_transaction as YnabScheduledTransaction;
 	}
 }
 
