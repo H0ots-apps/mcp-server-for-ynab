@@ -19,8 +19,16 @@ Talk to your YNAB plan from Claude. This is a small server you deploy to **your 
 | `update_transaction` | Change any field on one transaction |
 | `bulk_update_transactions` | Approve, categorize, clear or flag many transactions at once |
 | `delete_transaction` | Delete a transaction |
-| `assign_to_category` | Set how much is assigned to a category for a month |
-| `rename_category` | Rename a category (it keeps its group, transactions and target) |
+| `assign_to_category` | Set how much is assigned to a category for a month (negative allowed, so it can move money) |
+| `update_category` | Rename a category, change its note, or move it to another group |
+| `create_category` | Add a category to a group, optionally with a monthly target |
+| `create_category_group` | Add a category group |
+| `rename_category_group` | Rename a category group |
+| `rename_payee` | Rename a payee, e.g. "AMZN MKTP US*2K4" to "Amazon" |
+| `import_transactions` | Pull new transactions from linked bank accounts now |
+| `get_spending_by_category` | Net spending per category over any date range, optionally month by month |
+| `list_money_movements` | Money moved between categories in a month |
+| `reconcile_account` | Reconcile against a statement balance; changes nothing on a mismatch unless you approve an adjustment |
 | `set_category_target` | Create, change or remove a category's target: amount, weekly/monthly/yearly repeat, needed-by date, set aside or refill |
 | `get_month_history` | Income, assigned, activity, Ready to Assign and age of money for each month in a range, with averages |
 | `list_scheduled_transactions` | Scheduled (recurring or future) transactions, soonest first; filter by days ahead, account or payee |

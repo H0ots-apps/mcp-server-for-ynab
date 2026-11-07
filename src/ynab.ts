@@ -60,6 +60,8 @@ export interface YnabCategory {
 /** Category fields accepted by PATCH /categories/{id} (the subset this server uses). */
 export interface CategoryWrite {
 	name?: string;
+	note?: string | null;
+	category_group_id?: string;
 	goal_target?: Milliunits | null;
 	goal_target_date?: string | null;
 	goal_needs_whole_amount?: boolean | null;
@@ -70,6 +72,7 @@ export interface YnabCategoryGroup {
 	id: string;
 	name: string;
 	hidden: boolean;
+	internal?: boolean;
 	deleted: boolean;
 	categories: YnabCategory[];
 }
@@ -89,6 +92,7 @@ export interface YnabSubTransaction {
 	payee_name?: string | null;
 	category_id?: string | null;
 	category_name?: string | null;
+	transfer_account_id?: string | null;
 	deleted?: boolean;
 }
 
@@ -121,6 +125,16 @@ export interface YnabMonth {
 	to_be_budgeted: Milliunits;
 	age_of_money?: number | null;
 	categories: YnabCategory[];
+}
+
+export interface YnabMoneyMovement {
+	id: string;
+	month?: string | null;
+	moved_at?: string | null;
+	note?: string | null;
+	from_category_id?: string | null;
+	to_category_id?: string | null;
+	amount: Milliunits;
 }
 
 /** One row from GET /months: plan-level totals only, no categories. */
@@ -310,7 +324,8 @@ export class YnabClient {
 	async listTransactions(
 		planId: string,
 		opts: {
-			sinceDate: string;
+			/** Omit to fetch the full history (used by reconcile). */
+			sinceDate?: string;
 			untilDate?: string;
 			type?: "uncategorized" | "unapproved";
 			accountId?: string;
@@ -324,7 +339,8 @@ export class YnabClient {
 			path = `${this.plan(planId)}/categories/${opts.categoryId}/transactions`;
 		else if (opts.payeeId) path = `${this.plan(planId)}/payees/${opts.payeeId}/transactions`;
 
-		const params = new URLSearchParams({ since_date: opts.sinceDate });
+		const params = new URLSearchParams();
+		if (opts.sinceDate) params.set("since_date", opts.sinceDate);
 		if (opts.untilDate) params.set("until_date", opts.untilDate);
 		if (opts.type) params.set("type", opts.type);
 
@@ -397,6 +413,54 @@ export class YnabClient {
 			{ category },
 		);
 		return data.category as YnabCategory;
+	}
+
+	async createCategory(planId: string, category: CategoryWrite & { name: string; category_group_id: string }) {
+		const data = await this.request<any>("POST", `${this.plan(planId)}/categories`, { category });
+		return data.category as YnabCategory;
+	}
+
+	async createCategoryGroup(planId: string, name: string) {
+		const data = await this.request<any>("POST", `${this.plan(planId)}/category_groups`, {
+			category_group: { name },
+		});
+		return data.category_group as Omit<YnabCategoryGroup, "categories">;
+	}
+
+	async renameCategoryGroup(planId: string, groupId: string, name: string) {
+		const data = await this.request<any>(
+			"PATCH",
+			`${this.plan(planId)}/category_groups/${encodeURIComponent(groupId)}`,
+			{ category_group: { name } },
+		);
+		return data.category_group as Omit<YnabCategoryGroup, "categories">;
+	}
+
+	// ----- Payees -----
+
+	async renamePayee(planId: string, payeeId: string, name: string) {
+		const data = await this.request<any>(
+			"PATCH",
+			`${this.plan(planId)}/payees/${encodeURIComponent(payeeId)}`,
+			{ payee: { name } },
+		);
+		return data.payee as YnabPayee;
+	}
+
+	// ----- Import, money movements -----
+
+	/** Ask YNAB to import from linked (direct import) accounts now. Returns the new transaction IDs. */
+	async importTransactions(planId: string) {
+		const data = await this.request<any>("POST", `${this.plan(planId)}/transactions/import`);
+		return (data.transaction_ids ?? []) as string[];
+	}
+
+	async listMoneyMovements(planId: string, month?: string) {
+		const path = month
+			? `${this.plan(planId)}/months/${encodeURIComponent(month)}/money_movements`
+			: `${this.plan(planId)}/money_movements`;
+		const data = await this.request<any>("GET", path);
+		return (data.money_movements ?? []) as YnabMoneyMovement[];
 	}
 
 	// ----- Month history -----

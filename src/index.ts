@@ -10,8 +10,10 @@ import { YnabClient } from "./ynab";
 const INSTRUCTIONS = `Tools for the user's YNAB (You Need A Budget) account.
 - Amounts are in the plan's currency. In results, negative amounts are outflows (spending).
 - When adding transactions, give positive amounts with direction "outflow" or "inflow".
-- Before creating, editing or deleting transactions or scheduled transactions, or changing what is assigned to a category or its target, tell the user exactly what you will change and get their go-ahead, unless they already gave those exact details.
-- Use list_accounts and list_categories to find exact names when a name is ambiguous.`;
+- Before any change (creating, editing or deleting transactions or scheduled transactions; assigning or moving money; changing targets; renaming or reorganizing categories, groups or payees; reconciling), tell the user exactly what you will change and get their go-ahead, unless they already gave those exact details.
+- Use list_accounts and list_categories to find exact names when a name is ambiguous.
+- Daily routine: import_transactions, then list_transactions with only "unapproved", then categorize and approve with bulk_update_transactions. Check get_plan_overview for overspending and Ready to Assign.
+- To move money between categories, use assign_to_category twice: lower the source's total and raise the destination's by the same amount.`;
 
 function createServer() {
 	const server = new McpServer(

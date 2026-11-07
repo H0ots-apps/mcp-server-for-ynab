@@ -740,35 +740,123 @@ export function registerYnabTools(server: McpServer, ynab: YnabClient) {
 	registerMonthHistoryTools(server, ynab);
 	registerScheduledTransactionTools(server, ynab);
 	registerCategoryTools(server, ynab);
+	registerDailyTools(server, ynab);
 }
 
-// ---------- category edits: rename and targets ----------
+// ---------- category edits: rename, organize, targets ----------
+
+/** Find a user-visible category group by name or ID. */
+async function findGroup(ynab: YnabClient, plan: string, query: string) {
+	const groups = (await ynab.listCategoryGroups(plan)).filter(
+		(g) => !g.deleted && !g.internal && g.name !== "Internal Master Category",
+	);
+	return pickOne(groups, query, "category group", (g) => [g.name]);
+}
 
 function registerCategoryTools(server: McpServer, ynab: YnabClient) {
 	server.registerTool(
-		"rename_category",
+		"update_category",
 		{
-			title: "Rename a category",
+			title: "Rename or edit a category",
 			description:
-				"Rename one category. It stays in the same group and keeps its transactions, assigned amounts and target.",
+				"Rename a category, change its note, or move it to another category group. Pass only what should change. The category keeps its transactions, assigned amounts and target. (YNAB's API can't hide or delete categories.)",
 			inputSchema: z.object({
 				plan_id: planId,
 				category: z.string().describe("Current category name or ID"),
-				new_name: z.string().trim().min(1).max(200).describe("The new name"),
+				new_name: z.string().trim().min(1).max(200).optional().describe("New name"),
+				note: z.string().max(500).nullable().optional().describe("New note, or null to clear it"),
+				move_to_group: z.string().optional().describe("Category group name or ID to move it into"),
 			}),
 			annotations: WRITE,
 		},
-		wrap(async ({ plan_id, category, new_name }) => {
+		wrap(async ({ plan_id, category, new_name, note, move_to_group }) => {
 			const plan = resolvePlan(plan_id);
 			const cat = await new Lookup(ynab, plan).category(category);
-			if (cat.name === new_name) {
-				throw new ToolInputError(`"${cat.group}: ${cat.name}" already has that name.`);
+			const write: CategoryWrite = {};
+			let group = cat.group;
+			if (new_name !== undefined && new_name !== cat.name) write.name = new_name;
+			if (note !== undefined) write.note = note;
+			if (move_to_group) {
+				const g = await findGroup(ynab, plan, move_to_group);
+				if (g.id !== cat.category_group_id) {
+					write.category_group_id = g.id;
+					group = g.name;
+				}
 			}
-			const updated = await ynab.updateCategory(plan, cat.id, { name: new_name });
+			if (!Object.keys(write).length) {
+				throw new ToolInputError("Nothing to change: pass new_name, note or move_to_group with a different value.");
+			}
+			const updated = await ynab.updateCategory(plan, cat.id, write);
 			return {
-				previous_name: `${cat.group}: ${cat.name}`,
-				updated: simplifyCategory({ ...updated, group: cat.group }),
+				previous: { name: `${cat.group}: ${cat.name}`, ...(cat.note ? { note: cat.note } : {}) },
+				updated: simplifyCategory({ ...updated, group }),
 			};
+		}),
+	);
+
+	server.registerTool(
+		"create_category",
+		{
+			title: "Add a category",
+			description:
+				"Add a new category to an existing category group, optionally with a monthly target amount (use set_category_target for other target options).",
+			inputSchema: z.object({
+				plan_id: planId,
+				name: z.string().trim().min(1).max(200),
+				group: z.string().describe("Category group name or ID"),
+				note: z.string().max(500).optional(),
+				target_amount: z.number().positive().optional().describe("Optional monthly target, e.g. 50"),
+			}),
+			annotations: WRITE,
+		},
+		wrap(async ({ plan_id, name, group, note, target_amount }) => {
+			const plan = resolvePlan(plan_id);
+			const g = await findGroup(ynab, plan, group);
+			const created = await ynab.createCategory(plan, {
+				name,
+				category_group_id: g.id,
+				...(note ? { note } : {}),
+				...(target_amount !== undefined ? { goal_target: toMilliunits(target_amount) } : {}),
+			});
+			return { created: simplifyCategory({ ...created, group: g.name }) };
+		}),
+	);
+
+	server.registerTool(
+		"create_category_group",
+		{
+			title: "Add a category group",
+			description: "Add a new, empty category group. Then use create_category or update_category to fill it.",
+			inputSchema: z.object({
+				plan_id: planId,
+				name: z.string().trim().min(1).max(50).describe("Group name, up to 50 characters"),
+			}),
+			annotations: WRITE,
+		},
+		wrap(async ({ plan_id, name }) => {
+			const created = await ynab.createCategoryGroup(resolvePlan(plan_id), name);
+			return { created: { id: created.id, name: created.name } };
+		}),
+	);
+
+	server.registerTool(
+		"rename_category_group",
+		{
+			title: "Rename a category group",
+			description: "Rename one category group. Its categories stay in it.",
+			inputSchema: z.object({
+				plan_id: planId,
+				group: z.string().describe("Current group name or ID"),
+				new_name: z.string().trim().min(1).max(50).describe("New name, up to 50 characters"),
+			}),
+			annotations: WRITE,
+		},
+		wrap(async ({ plan_id, group, new_name }) => {
+			const plan = resolvePlan(plan_id);
+			const g = await findGroup(ynab, plan, group);
+			if (g.name === new_name) throw new ToolInputError(`The group is already called "${g.name}".`);
+			const updated = await ynab.renameCategoryGroup(plan, g.id, new_name);
+			return { previous_name: g.name, updated: { id: updated.id, name: updated.name } };
 		}),
 	);
 
@@ -1138,6 +1226,258 @@ function registerScheduledTransactionTools(server: McpServer, ynab: YnabClient) 
 		wrap(async ({ plan_id, scheduled_transaction_id }) => {
 			const deleted = await ynab.deleteScheduledTransaction(resolvePlan(plan_id), scheduled_transaction_id);
 			return { deleted: simplifyScheduled(deleted) };
+		}),
+	);
+}
+
+// ---------- day-to-day: payees, import, reviews, reconcile ----------
+
+/** A date that is "today" or earlier in every time zone, so YNAB never sees it as future-dated. */
+function safeToday() {
+	return new Date(Date.now() - 12 * 3_600_000).toISOString().slice(0, 10);
+}
+
+function registerDailyTools(server: McpServer, ynab: YnabClient) {
+	server.registerTool(
+		"rename_payee",
+		{
+			title: "Rename a payee",
+			description:
+				"Rename a payee, e.g. clean up 'AMZN MKTP US*2K4' to 'Amazon'. All its transactions show the new name. (YNAB's API can't merge payees; do that in YNAB.)",
+			inputSchema: z.object({
+				plan_id: planId,
+				payee: z.string().describe("Current payee name or ID"),
+				new_name: z.string().trim().min(1).max(500),
+			}),
+			annotations: WRITE,
+		},
+		wrap(async ({ plan_id, payee, new_name }) => {
+			const plan = resolvePlan(plan_id);
+			const payees = (await ynab.listPayees(plan)).filter((p) => !p.deleted);
+			const p = pickOne(payees, payee, "payee", (x) => [x.name]);
+			if (p.transfer_account_id) {
+				throw new ToolInputError(`"${p.name}" is a transfer payee; rename the account instead (in YNAB).`);
+			}
+			if (p.name === new_name) throw new ToolInputError(`The payee is already called "${p.name}".`);
+			const updated = await ynab.renamePayee(plan, p.id, new_name);
+			return { previous_name: p.name, updated: { id: updated.id, name: updated.name } };
+		}),
+	);
+
+	server.registerTool(
+		"import_transactions",
+		{
+			title: "Import from linked accounts",
+			description:
+				"Ask YNAB to pull new transactions from linked (direct import) bank accounts now. Then review them with list_transactions (only: 'unapproved') and categorize/approve with bulk_update_transactions.",
+			inputSchema: z.object({ plan_id: planId }),
+			annotations: WRITE,
+		},
+		wrap(async ({ plan_id }) => {
+			const ids = await ynab.importTransactions(resolvePlan(plan_id));
+			return {
+				imported: ids.length,
+				transaction_ids: ids,
+				next_step: "list_transactions with only: 'unapproved' to review them.",
+			};
+		}),
+	);
+
+	server.registerTool(
+		"get_spending_by_category",
+		{
+			title: "Spending by category",
+			description:
+				"Net activity per category over a date range (default: this month so far), from one transaction download. Negative = spending; refunds offset it. Transfers between budget accounts are left out; income to Ready to Assign is reported separately. Set by_month for a month-by-month breakdown, e.g. 'groceries per month this year'.",
+			inputSchema: z.object({
+				plan_id: planId,
+				since_date: isoDate.optional().describe("Start date (default: the 1st of this month)"),
+				until_date: isoDate.optional().describe("End date (default: today)"),
+				by_month: z.boolean().default(false).describe("Also break each category down by month"),
+				category: z.string().optional().describe("Only this category (name or ID)"),
+			}),
+			annotations: READ,
+		},
+		wrap(async (args) => {
+			const plan = resolvePlan(args.plan_id);
+			const since = args.since_date ?? currentMonthStart();
+			const [txns, groups] = await Promise.all([
+				ynab.listTransactions(plan, { sinceDate: since, untilDate: args.until_date }),
+				ynab.listCategoryGroups(plan),
+			]);
+			const catInfo = new Map<string, { label: string; income: boolean }>();
+			for (const g of groups) {
+				for (const c of g.categories) {
+					const internal = g.internal || g.name === "Internal Master Category";
+					catInfo.set(c.id, {
+						label: internal ? c.name : `${g.name}: ${c.name}`,
+						income: internal && c.name.startsWith("Inflow"),
+					});
+				}
+			}
+			const onlyId = args.category ? (await new Lookup(ynab, plan).category(args.category)).id : undefined;
+
+			const totals = new Map<string, { total: number; months: Map<string, number> }>();
+			let income = 0;
+			for (const t of txns) {
+				if (t.deleted) continue;
+				const subs = (t.subtransactions ?? []).filter((s) => !s.deleted);
+				const parts = subs.length ? subs : [t];
+				for (const p of parts) {
+					if (p.transfer_account_id && !p.category_id) continue; // transfer between budget accounts
+					if (onlyId && p.category_id !== onlyId) continue;
+					const info = p.category_id ? catInfo.get(p.category_id) : undefined;
+					if (info?.income) {
+						income += p.amount;
+						continue;
+					}
+					const label = info?.label ?? "Uncategorized";
+					const row = totals.get(label) ?? { total: 0, months: new Map() };
+					row.total += p.amount;
+					const month = t.date.slice(0, 7);
+					row.months.set(month, (row.months.get(month) ?? 0) + p.amount);
+					totals.set(label, row);
+				}
+			}
+
+			const rows = [...totals.entries()].sort((a, b) => a[1].total - b[1].total);
+			return {
+				since,
+				until: args.until_date ?? "today",
+				total_activity: money(rows.reduce((s, [, r]) => s + r.total, 0)),
+				...(onlyId ? {} : { income_to_ready_to_assign: money(income) }),
+				categories: rows.map(([label, r]) => ({
+					category: label,
+					activity: money(r.total),
+					...(args.by_month
+						? {
+								by_month: Object.fromEntries(
+									[...r.months.entries()].sort().map(([m, v]) => [m, money(v)]),
+								),
+							}
+						: {}),
+				})),
+			};
+		}),
+	);
+
+	server.registerTool(
+		"list_money_movements",
+		{
+			title: "List money movements",
+			description:
+				"Money moved between categories (and to/from Ready to Assign) in a month, newest first. Use for 'where did I move money from to cover dining?'.",
+			inputSchema: z.object({
+				plan_id: planId,
+				month: monthParam,
+				category: z.string().optional().describe("Only movements into or out of this category (name or ID)"),
+			}),
+			annotations: READ,
+		},
+		wrap(async ({ plan_id, month, category }) => {
+			const plan = resolvePlan(plan_id);
+			const [moves, groups] = await Promise.all([
+				ynab.listMoneyMovements(plan, normalizeMonth(month)),
+				ynab.listCategoryGroups(plan),
+			]);
+			const names = new Map<string, string>();
+			for (const g of groups) for (const c of g.categories) names.set(c.id, `${g.name}: ${c.name}`);
+			const name = (id?: string | null) => (id ? (names.get(id) ?? id) : "Ready to Assign");
+			const onlyId = category ? (await new Lookup(ynab, plan).category(category)).id : undefined;
+
+			const rows = moves
+				.filter((m) => !onlyId || m.from_category_id === onlyId || m.to_category_id === onlyId)
+				.sort((a, b) => ((a.moved_at ?? "") < (b.moved_at ?? "") ? 1 : -1));
+			return {
+				count: rows.length,
+				money_movements: rows.map((m) => ({
+					moved_at: m.moved_at ?? null,
+					month: m.month?.slice(0, 7) ?? null,
+					from: name(m.from_category_id),
+					to: name(m.to_category_id),
+					amount: money(m.amount),
+					...(m.note ? { note: m.note } : {}),
+				})),
+			};
+		}),
+	);
+
+	server.registerTool(
+		"reconcile_account",
+		{
+			title: "Reconcile an account",
+			description:
+				"Reconcile an account against the bank's statement balance. If YNAB's cleared balance matches, marks all cleared transactions as reconciled (locked). If it doesn't match, changes nothing and returns the difference and the uncleared transactions so you can find it, unless adjust_difference is true, which first adds a 'Reconciliation Balance Adjustment' transaction for the difference. Confirm with the user before reconciling, and especially before adjusting.",
+			inputSchema: z.object({
+				plan_id: planId,
+				account: z.string().describe("Account name or ID"),
+				statement_balance: z
+					.number()
+					.describe("Bank's current cleared balance, signed like YNAB shows it: credit card or loan debt is negative, e.g. -512.30"),
+				adjust_difference: z
+					.boolean()
+					.default(false)
+					.describe("Add an adjustment transaction if the balances differ. Only after the user agrees."),
+				adjustment_date: isoDate.optional().describe("Date for the adjustment (default: today)"),
+			}),
+			annotations: DESTRUCTIVE,
+		},
+		wrap(async (args) => {
+			const plan = resolvePlan(args.plan_id);
+			const lookup = new Lookup(ynab, plan);
+			const acct = await lookup.account(args.account);
+			const target = toMilliunits(args.statement_balance);
+			const difference = target - acct.cleared_balance;
+			const txns = (await ynab.listTransactions(plan, { accountId: acct.id })).filter((t) => !t.deleted);
+
+			if (difference !== 0 && !args.adjust_difference) {
+				return {
+					reconciled: false,
+					account: acct.name,
+					ynab_cleared_balance: money(acct.cleared_balance),
+					statement_balance: args.statement_balance,
+					difference: money(difference),
+					hint: "Nothing was changed. Check for missing or uncleared transactions below, or a sign mistake (debt is negative). To accept the difference, call again with adjust_difference: true after the user agrees.",
+					uncleared_transactions: txns
+						.filter((t) => t.cleared === "uncleared")
+						.sort((a, b) => (a.date < b.date ? 1 : -1))
+						.slice(0, 50)
+						.map(simplifyTransaction),
+				};
+			}
+
+			let adjustment: ReturnType<typeof simplifyTransaction> | undefined;
+			if (difference !== 0) {
+				const rta = acct.on_budget ? (await lookup.category("Inflow: Ready to Assign")).id : null;
+				const result = await ynab.createTransactions(plan, [
+					{
+						account_id: acct.id,
+						date: args.adjustment_date ?? safeToday(),
+						amount: difference,
+						payee_name: "Reconciliation Balance Adjustment",
+						category_id: rta,
+						memo: "Entered by the YNAB connector during reconciliation",
+						cleared: "reconciled",
+						approved: true,
+					},
+				]);
+				adjustment = result.transactions[0] ? simplifyTransaction(result.transactions[0]) : undefined;
+			}
+
+			const toLock = txns.filter((t) => t.cleared === "cleared");
+			for (let i = 0; i < toLock.length; i += 100) {
+				await ynab.updateTransactions(
+					plan,
+					toLock.slice(i, i + 100).map((t) => ({ id: t.id, cleared: "reconciled" as const })),
+				);
+			}
+			return {
+				reconciled: true,
+				account: acct.name,
+				reconciled_balance: args.statement_balance,
+				transactions_locked: toLock.length,
+				...(adjustment ? { adjustment } : {}),
+			};
 		}),
 	);
 }
