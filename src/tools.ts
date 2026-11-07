@@ -1232,6 +1232,9 @@ function registerScheduledTransactionTools(server: McpServer, ynab: YnabClient) 
 
 // ---------- day-to-day: payees, import, reviews, reconcile ----------
 
+// YNAB reserves "Reconciliation Balance Adjustment" and the API rejects it as a payee name.
+const ADJUSTMENT_PAYEE = "Market Value Adjustment";
+
 /** A date that is "today" or earlier in every time zone, so YNAB never sees it as future-dated. */
 function safeToday() {
 	return new Date(Date.now() - 12 * 3_600_000).toISOString().slice(0, 10);
@@ -1407,7 +1410,7 @@ function registerDailyTools(server: McpServer, ynab: YnabClient) {
 		{
 			title: "Reconcile an account",
 			description:
-				"Reconcile an account against the bank's statement balance. If YNAB's cleared balance matches, marks all cleared transactions as reconciled (locked). If it doesn't match, changes nothing and returns the difference and the uncleared transactions so you can find it, unless adjust_difference is true, which first adds a 'Reconciliation Balance Adjustment' transaction for the difference. Confirm with the user before reconciling, and especially before adjusting.",
+				"Reconcile an account against the bank's statement balance. If YNAB's cleared balance matches, marks all cleared transactions as reconciled (locked). If it doesn't match, changes nothing and returns the difference and the uncleared transactions so you can find it, unless adjust_difference is true, which first adds a 'Market Value Adjustment' transaction for the difference. Confirm with the user before reconciling, and especially before adjusting.",
 			inputSchema: z.object({
 				plan_id: planId,
 				account: z.string().describe("Account name or ID"),
@@ -1454,7 +1457,7 @@ function registerDailyTools(server: McpServer, ynab: YnabClient) {
 						account_id: acct.id,
 						date: args.adjustment_date ?? safeToday(),
 						amount: difference,
-						payee_name: "Reconciliation Balance Adjustment",
+						payee_name: ADJUSTMENT_PAYEE,
 						category_id: rta,
 						memo: "Entered by the YNAB connector during reconciliation",
 						cleared: "reconciled",
