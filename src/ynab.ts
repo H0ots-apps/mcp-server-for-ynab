@@ -48,8 +48,21 @@ export interface YnabCategory {
 	goal_target?: Milliunits | null;
 	goal_percentage_complete?: number | null;
 	goal_under_funded?: Milliunits | null;
+	goal_target_date?: string | null;
+	goal_target_month?: string | null;
+	goal_needs_whole_amount?: boolean | null;
+	goal_cadence?: number | null;
+	goal_cadence_frequency?: number | null;
 	note?: string | null;
 	deleted: boolean;
+}
+
+/** Category fields accepted by PATCH /categories/{id}. Only goal fields are used so far. */
+export interface CategoryWrite {
+	goal_target?: Milliunits | null;
+	goal_target_date?: string | null;
+	goal_needs_whole_amount?: boolean | null;
+	goal_frequency?: "monthly" | "weekly" | "yearly";
 }
 
 export interface YnabCategoryGroup {
@@ -370,6 +383,17 @@ export class YnabClient {
 			"PATCH",
 			`${this.plan(planId)}/months/${encodeURIComponent(month)}/categories/${encodeURIComponent(categoryId)}`,
 			{ category: { budgeted } },
+		);
+		return data.category as YnabCategory;
+	}
+
+	// ----- Category targets -----
+
+	async updateCategory(planId: string, categoryId: string, category: CategoryWrite) {
+		const data = await this.request<any>(
+			"PATCH",
+			`${this.plan(planId)}/categories/${encodeURIComponent(categoryId)}`,
+			{ category },
 		);
 		return data.category as YnabCategory;
 	}

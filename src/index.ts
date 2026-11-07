@@ -10,7 +10,7 @@ import { YnabClient } from "./ynab";
 const INSTRUCTIONS = `Tools for the user's YNAB (You Need A Budget) account.
 - Amounts are in the plan's currency. In results, negative amounts are outflows (spending).
 - When adding transactions, give positive amounts with direction "outflow" or "inflow".
-- Before creating, editing or deleting transactions or scheduled transactions, or changing what is assigned to a category, tell the user exactly what you will change and get their go-ahead, unless they already gave those exact details.
+- Before creating, editing or deleting transactions or scheduled transactions, or changing what is assigned to a category or its target, tell the user exactly what you will change and get their go-ahead, unless they already gave those exact details.
 - Use list_accounts and list_categories to find exact names when a name is ambiguous.`;
 
 function createServer() {

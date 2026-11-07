@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
+	type CategoryWrite,
 	fromMilliunits,
 	SCHEDULED_FREQUENCIES,
 	type ScheduledTransactionWrite,
@@ -212,6 +213,12 @@ function simplifyCategory(c: YnabCategory & { group?: string }) {
 						target: money(c.goal_target),
 						percent_complete: c.goal_percentage_complete ?? null,
 						underfunded: money(c.goal_under_funded),
+						...(c.goal_target_date || c.goal_target_month
+							? { target_date: c.goal_target_date ?? c.goal_target_month }
+							: {}),
+						...(typeof c.goal_needs_whole_amount === "boolean"
+							? { mode: c.goal_needs_whole_amount ? "set_aside" : "refill" }
+							: {}),
 					},
 				}
 			: {}),
@@ -730,6 +737,75 @@ export function registerYnabTools(server: McpServer, ynab: YnabClient) {
 
 	registerMonthHistoryTools(server, ynab);
 	registerScheduledTransactionTools(server, ynab);
+	registerCategoryTargetTools(server, ynab);
+}
+
+// ---------- category targets ----------
+
+function registerCategoryTargetTools(server: McpServer, ynab: YnabClient) {
+	server.registerTool(
+		"set_category_target",
+		{
+			title: "Set a category target",
+			description:
+				"Create, change or remove a category's target (YNAB's goals). Pass only what should change. Setting an amount on a category with no target creates a monthly target. frequency makes a repeating target and replaces the existing one; by_date sets when the amount is needed; mode picks 'set aside' (full amount every period) or 'refill' (top up to the amount). YNAB's API can't create 'have a balance of' targets, and credit card payment and loan categories don't support frequency, by_date or mode.",
+			inputSchema: z.object({
+				plan_id: planId,
+				category: z.string().describe("Category name or ID"),
+				amount: z.number().positive().optional().describe("Target amount, e.g. 400"),
+				frequency: z
+					.enum(["monthly", "weekly", "yearly"])
+					.optional()
+					.describe("Repeat the target at this frequency. Requires amount; can't be combined with by_date."),
+				by_date: isoDate
+					.nullable()
+					.optional()
+					.describe("Date the amount is needed by, YYYY-MM-DD, or null to clear the date"),
+				mode: z
+					.enum(["set_aside", "refill"])
+					.optional()
+					.describe('"set_aside": ask for the full amount every period. "refill": top up to the amount.'),
+				remove: z.boolean().default(false).describe("Remove the category's target entirely"),
+			}),
+			annotations: WRITE,
+		},
+		wrap(async (args) => {
+			const plan = resolvePlan(args.plan_id);
+			const cat = await new Lookup(ynab, plan).category(args.category);
+			const changes = [args.amount, args.frequency, args.by_date, args.mode].filter((v) => v !== undefined);
+
+			let write: CategoryWrite;
+			if (args.remove) {
+				if (changes.length) throw new ToolInputError("Pass remove on its own, without other target fields.");
+				write = { goal_target: null };
+			} else {
+				if (!changes.length) {
+					throw new ToolInputError("Pass at least one of amount, frequency, by_date, mode, or remove.");
+				}
+				if (args.frequency && args.amount === undefined) {
+					throw new ToolInputError("frequency needs an amount as well.");
+				}
+				if (args.frequency && args.by_date) {
+					throw new ToolInputError("Use frequency or by_date, not both.");
+				}
+				if (!cat.goal_type && args.amount === undefined) {
+					throw new ToolInputError(`"${cat.name}" has no target yet, so pass an amount to create one.`);
+				}
+				write = {};
+				if (args.amount !== undefined) write.goal_target = toMilliunits(args.amount);
+				if (args.frequency) write.goal_frequency = args.frequency;
+				if (args.by_date !== undefined) write.goal_target_date = args.by_date;
+				if (args.mode) write.goal_needs_whole_amount = args.mode === "set_aside";
+			}
+
+			const updated = await ynab.updateCategory(plan, cat.id, write);
+			return {
+				...(args.remove ? { removed_target: true } : {}),
+				previous_target: cat.goal_type ? simplifyCategory(cat).goal : null,
+				updated: simplifyCategory({ ...updated, group: cat.group }),
+			};
+		}),
+	);
 }
 
 // ---------- month history ----------
