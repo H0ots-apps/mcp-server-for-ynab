@@ -739,12 +739,39 @@ export function registerYnabTools(server: McpServer, ynab: YnabClient) {
 
 	registerMonthHistoryTools(server, ynab);
 	registerScheduledTransactionTools(server, ynab);
-	registerCategoryTargetTools(server, ynab);
+	registerCategoryTools(server, ynab);
 }
 
-// ---------- category targets ----------
+// ---------- category edits: rename and targets ----------
 
-function registerCategoryTargetTools(server: McpServer, ynab: YnabClient) {
+function registerCategoryTools(server: McpServer, ynab: YnabClient) {
+	server.registerTool(
+		"rename_category",
+		{
+			title: "Rename a category",
+			description:
+				"Rename one category. It stays in the same group and keeps its transactions, assigned amounts and target.",
+			inputSchema: z.object({
+				plan_id: planId,
+				category: z.string().describe("Current category name or ID"),
+				new_name: z.string().trim().min(1).max(200).describe("The new name"),
+			}),
+			annotations: WRITE,
+		},
+		wrap(async ({ plan_id, category, new_name }) => {
+			const plan = resolvePlan(plan_id);
+			const cat = await new Lookup(ynab, plan).category(category);
+			if (cat.name === new_name) {
+				throw new ToolInputError(`"${cat.group}: ${cat.name}" already has that name.`);
+			}
+			const updated = await ynab.updateCategory(plan, cat.id, { name: new_name });
+			return {
+				previous_name: `${cat.group}: ${cat.name}`,
+				updated: simplifyCategory({ ...updated, group: cat.group }),
+			};
+		}),
+	);
+
 	server.registerTool(
 		"set_category_target",
 		{

@@ -57,8 +57,9 @@ export interface YnabCategory {
 	deleted: boolean;
 }
 
-/** Category fields accepted by PATCH /categories/{id}. Only goal fields are used so far. */
+/** Category fields accepted by PATCH /categories/{id} (the subset this server uses). */
 export interface CategoryWrite {
+	name?: string;
 	goal_target?: Milliunits | null;
 	goal_target_date?: string | null;
 	goal_needs_whole_amount?: boolean | null;
