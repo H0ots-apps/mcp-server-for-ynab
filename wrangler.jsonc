@@ -27,6 +27,11 @@
     {
       "binding": "OAUTH_KV",
       "id": "ed2eaa3dd77b41baa645ec8c943791b7"
+    },
+    {
+      // Change log and plan notes for the budget tools (src/store.ts).
+      "binding": "BUDGET_KV",
+      "id": "8179b22a692149c9a790d0dddb51748d"
     }
   ],
   "observability": {

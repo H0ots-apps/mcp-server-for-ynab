@@ -404,6 +404,14 @@ export class YnabClient {
 		return data.category as YnabCategory;
 	}
 
+	async getMonthCategory(planId: string, month: string, categoryId: string) {
+		const data = await this.request<any>(
+			"GET",
+			`${this.plan(planId)}/months/${encodeURIComponent(month)}/categories/${encodeURIComponent(categoryId)}`,
+		);
+		return data.category as YnabCategory;
+	}
+
 	// ----- Category targets -----
 
 	async updateCategory(planId: string, categoryId: string, category: CategoryWrite) {

@@ -3,6 +3,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler, getMcpAuthContext } from "agents/mcp/server";
 import { GitHubHandler } from "./github-handler";
+import { BudgetStore } from "./store";
 import { registerYnabTools } from "./tools";
 import { isAllowedUser, type Props } from "./utils";
 import { YnabClient } from "./ynab";
@@ -11,8 +12,10 @@ const INSTRUCTIONS = `Tools for the user's YNAB (You Need A Budget) account.
 - Amounts are in the plan's currency. In results, negative amounts are outflows (spending).
 - When adding transactions, give positive amounts with direction "outflow" or "inflow".
 - Before any change (creating, editing or deleting transactions or scheduled transactions; assigning or moving money; changing targets; renaming or reorganizing categories, groups or payees; reconciling), tell the user exactly what you will change and get their go-ahead, unless they already gave those exact details.
+- Before budgeting work (assigning or moving money, reconciling, reviews), read get_plan_notes and follow its rules and priorities.
+- Every change made through these tools is logged; list_recent_changes shows them and their previous values.
 - Use list_accounts and list_categories to find exact names when a name is ambiguous.
-- Daily routine: import_transactions, then list_transactions with only "unapproved", then categorize and approve with bulk_update_transactions. Check get_plan_overview for overspending and Ready to Assign.
+- Daily routine: import_transactions, then suggest_categories, then categorize and approve with bulk_update_transactions. For weekly check-ins use get_budget_review. Check get_plan_overview for overspending and Ready to Assign.
 - To move money between categories, use assign_to_category twice: lower the source's total and raise the destination's by the same amount.`;
 
 function createServer() {
@@ -24,7 +27,11 @@ function createServer() {
 	const props = getMcpAuthContext()?.props as Props | undefined;
 	// Tools are only registered for signed-in, allowlisted users.
 	if (props && isAllowedUser(props.login)) {
-		registerYnabTools(server, new YnabClient(env.YNAB_ACCESS_TOKEN));
+		registerYnabTools(
+			server,
+			new YnabClient(env.YNAB_ACCESS_TOKEN),
+			env.BUDGET_KV ? new BudgetStore(env.BUDGET_KV) : undefined,
+		);
 	}
 	return server;
 }

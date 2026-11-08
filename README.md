@@ -29,6 +29,11 @@ Talk to your YNAB plan from Claude. This is a small server you deploy to **your 
 | `get_spending_by_category` | Net spending per category over any date range, optionally month by month |
 | `list_money_movements` | Money moved between categories in a month |
 | `reconcile_account` | Reconcile against a statement balance; changes nothing on a mismatch unless you approve an adjustment |
+| `get_budget_review` | One-call check-in: Ready to Assign, overspent, underfunded targets, unapproved count, bills due soon |
+| `suggest_categories` | Unapproved transactions with a suggested category from the payee's history |
+| `forecast_cash_flow` | Project account balances forward from scheduled transactions; flag low points |
+| `get_plan_notes` / `save_plan_note` / `delete_plan_note` | Shared budget plan (rules, goals, priorities, progress) stored on the worker |
+| `list_recent_changes` | Log of every change made through the connector, with previous values |
 | `set_category_target` | Create, change or remove a category's target: amount, weekly/monthly/yearly repeat, needed-by date, set aside or refill |
 | `get_month_history` | Income, assigned, activity, Ready to Assign and age of money for each month in a range, with averages |
 | `list_scheduled_transactions` | Scheduled (recurring or future) transactions, soonest first; filter by days ahead, account or payee |

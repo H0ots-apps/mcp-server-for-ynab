@@ -1,5 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { addDays, occurrences } from "./forecast";
+import { type BudgetStore, MAX_NOTE_CHARS } from "./store";
 import {
 	type CategoryWrite,
 	fromMilliunits,
@@ -233,7 +235,10 @@ const READ = { readOnlyHint: true, openWorldHint: true } as const;
 const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: true } as const;
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, openWorldHint: true } as const;
 
-export function registerYnabTools(server: McpServer, ynab: YnabClient) {
+export function registerYnabTools(rawServer: McpServer, ynab: YnabClient, store?: BudgetStore) {
+	// Every tool not marked read-only is recorded in the change log (fork addition).
+	const server = withChangeLog(rawServer, store);
+
 	// ----- Read tools -----
 
 	server.registerTool(
@@ -644,7 +649,7 @@ export function registerYnabTools(server: McpServer, ynab: YnabClient) {
 			}
 
 			const updated = await ynab.updateTransaction(plan, args.transaction_id, write);
-			return { updated: simplifyTransaction(updated) };
+			return { previous: simplifyTransaction(existing), updated: simplifyTransaction(updated) };
 		}),
 	);
 
@@ -727,13 +732,17 @@ export function registerYnabTools(server: McpServer, ynab: YnabClient) {
 		wrap(async ({ plan_id, month, category, assigned }) => {
 			const plan = resolvePlan(plan_id);
 			const cat = await new Lookup(ynab, plan).category(category);
+			const before = await ynab.getMonthCategory(plan, normalizeMonth(month), cat.id);
 			const updated = await ynab.setCategoryBudgeted(
 				plan,
 				normalizeMonth(month),
 				cat.id,
 				toMilliunits(assigned),
 			);
-			return { updated: simplifyCategory({ ...updated, group: cat.group }) };
+			return {
+				previous_assigned: money(before.budgeted),
+				updated: simplifyCategory({ ...updated, group: cat.group }),
+			};
 		}),
 	);
 
@@ -741,6 +750,7 @@ export function registerYnabTools(server: McpServer, ynab: YnabClient) {
 	registerScheduledTransactionTools(server, ynab);
 	registerCategoryTools(server, ynab);
 	registerDailyTools(server, ynab);
+	registerPlanningTools(server, ynab, store);
 }
 
 // ---------- category edits: rename, organize, targets ----------
@@ -1210,7 +1220,7 @@ function registerScheduledTransactionTools(server: McpServer, ynab: YnabClient) 
 			if (args.flag_color !== undefined) write.flag_color = args.flag_color;
 
 			const updated = await ynab.updateScheduledTransaction(plan, args.scheduled_transaction_id, write);
-			return { updated: simplifyScheduled(updated) };
+			return { previous: simplifyScheduled(existing), updated: simplifyScheduled(updated) };
 		}),
 	);
 
@@ -1480,6 +1490,384 @@ function registerDailyTools(server: McpServer, ynab: YnabClient) {
 				reconciled_balance: args.statement_balance,
 				transactions_locked: toLock.length,
 				...(adjustment ? { adjustment } : {}),
+			};
+		}),
+	);
+}
+
+// ---------- planning: change log, plan notes, suggestions, review, forecast ----------
+
+/**
+ * Wraps registerTool so every successful call to a tool that isn't read-only is
+ * recorded in the change log. Logging problems never fail the tool itself.
+ */
+function withChangeLog(server: McpServer, store?: BudgetStore): McpServer {
+	if (!store) return server;
+	const target = server as any;
+	const shim = {
+		registerTool(name: string, config: any, handler: (args: any, extra: any) => Promise<ToolResult>) {
+			if (config?.annotations?.readOnlyHint !== false) return target.registerTool(name, config, handler);
+			return target.registerTool(name, config, async (args: any, extra: any) => {
+				const result = await handler(args, extra);
+				if (!result.isError) {
+					try {
+						const text = result.content[0]?.text ?? "";
+						let parsed: unknown = text;
+						try {
+							parsed = JSON.parse(text);
+						} catch {
+							// keep the raw text
+						}
+						await store.recordChange(name, args, parsed);
+					} catch (error) {
+						console.error("Change log write failed:", error);
+					}
+				}
+				return result;
+			});
+		},
+	};
+	return shim as unknown as McpServer;
+}
+
+function todayUtc() {
+	return new Date().toISOString().slice(0, 10);
+}
+
+function categoryLabel(c: YnabCategory) {
+	return c.category_group_name ? `${c.category_group_name}: ${c.name}` : c.name;
+}
+
+function registerPlanningTools(server: McpServer, ynab: YnabClient, store?: BudgetStore) {
+	if (store) {
+		server.registerTool(
+			"list_recent_changes",
+			{
+				title: "Recent changes",
+				description:
+					"Changes made through this connector (from any chat or scheduled task), newest first. Edits made in the YNAB app aren't included. Pass change_id to get one change's full details, including previous values where the tool returned them, e.g. to undo it.",
+				inputSchema: z.object({
+					days: z.number().int().min(1).max(400).default(7).describe("How far back to look"),
+					tool: z.string().optional().describe("Only changes made by this tool, e.g. assign_to_category"),
+					limit: z.number().int().min(1).max(200).default(50),
+					change_id: z.string().optional().describe("Return the full record of this one change"),
+				}),
+				annotations: READ,
+			},
+			wrap(async ({ days, tool, limit, change_id }) => {
+				if (change_id) {
+					const entry = await store.getChange(change_id);
+					if (!entry) throw new ToolInputError(`No change with ID ${change_id}. It may be older than 400 days.`);
+					return entry;
+				}
+				const since = new Date(Date.now() - days * 86_400_000);
+				const changes = await store.listChanges(since, tool, limit);
+				return {
+					since: since.toISOString().slice(0, 10),
+					count: changes.length,
+					changes,
+					...(changes.length ? { next_step: "Pass change_id for the full before/after record." } : {}),
+				};
+			}),
+		);
+
+		server.registerTool(
+			"get_plan_notes",
+			{
+				title: "Read the budget plan",
+				description:
+					"Read the shared budget plan: goals, rules, priorities and progress notes saved with save_plan_note. Read this before budgeting work (assigning money, reconciling, reviews) and follow its rules.",
+				inputSchema: z.object({}),
+				annotations: READ,
+			},
+			wrap(async () => {
+				const notes = await store.listNotes();
+				return notes.length
+					? { notes }
+					: {
+							notes: [],
+							hint: "No plan notes yet. Suggest topics like Rules, Goals, Priorities and Progress, and save them with save_plan_note once the user agrees.",
+						};
+			}),
+		);
+
+		server.registerTool(
+			"save_plan_note",
+			{
+				title: "Save a plan note",
+				description:
+					"Save a budget plan note under a topic, e.g. Rules, Goals, Priorities or Progress. mode 'replace' overwrites the topic; 'append' adds to the end, which suits dated progress entries. Agree the wording with the user before changing Rules or Goals.",
+				inputSchema: z.object({
+					topic: z.string().trim().min(1).max(80),
+					text: z.string().min(1).max(MAX_NOTE_CHARS),
+					mode: z.enum(["replace", "append"]).default("replace"),
+				}),
+				annotations: WRITE,
+			},
+			wrap(async ({ topic, text, mode }) => {
+				try {
+					const { note, previous } = await store.saveNote(topic, text, mode);
+					return { saved: note, ...(previous && mode === "replace" ? { previous_text: previous.text } : {}) };
+				} catch (error) {
+					throw new ToolInputError(error instanceof Error ? error.message : String(error));
+				}
+			}),
+		);
+
+		server.registerTool(
+			"delete_plan_note",
+			{
+				title: "Delete a plan note",
+				description: "Delete one plan note topic. Its text is kept in the change log. Confirm with the user first.",
+				inputSchema: z.object({ topic: z.string().trim().min(1).max(80) }),
+				annotations: DESTRUCTIVE,
+			},
+			wrap(async ({ topic }) => {
+				const previous = await store.deleteNote(topic);
+				if (!previous) throw new ToolInputError(`There's no plan note called "${topic}".`);
+				return { deleted: previous };
+			}),
+		);
+	}
+
+	server.registerTool(
+		"suggest_categories",
+		{
+			title: "Suggest categories",
+			description:
+				"List unapproved transactions with a suggested category for each, based on how the same payee was categorized in approved transactions. Use it for the daily approval routine, then apply with bulk_update_transactions (category = category_id, approved: true). Two YNAB requests in total.",
+			inputSchema: z.object({
+				plan_id: planId,
+				history_days: z.number().int().min(30).max(730).default(180).describe("How much history to learn from"),
+				limit: z.number().int().min(1).max(200).default(100),
+			}),
+			annotations: READ,
+		},
+		wrap(async ({ plan_id, history_days, limit }) => {
+			const plan = resolvePlan(plan_id);
+			const [unapproved, history] = await Promise.all([
+				ynab.listTransactions(plan, { type: "unapproved" }),
+				ynab.listTransactions(plan, { sinceDate: daysAgo(history_days) }),
+			]);
+			const keyOf = (t: YnabTransaction) =>
+				t.payee_id ?? (t.payee_name ? `name:${norm(t.payee_name)}` : null);
+
+			const counts = new Map<string, Map<string, { name: string; n: number }>>();
+			for (const t of history) {
+				if (t.deleted || !t.approved || !t.category_id || t.transfer_account_id) continue;
+				if (t.subtransactions?.some((x) => !x.deleted)) continue;
+				const key = keyOf(t);
+				if (!key) continue;
+				const byCat = counts.get(key) ?? new Map();
+				const row = byCat.get(t.category_id) ?? { name: t.category_name ?? t.category_id, n: 0 };
+				row.n += 1;
+				byCat.set(t.category_id, row);
+				counts.set(key, byCat);
+			}
+
+			const pending = unapproved
+				.filter((t) => !t.deleted)
+				.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+			const rows = pending.slice(0, limit).map((t) => {
+				const base = { ...simplifyTransaction(t), category_id: t.category_id ?? null };
+				if (t.transfer_account_id) return { ...base, suggestion: null, note: "Transfer; no category needed." };
+				if (t.subtransactions?.some((x) => !x.deleted)) return { ...base, suggestion: null, note: "Split; check in YNAB." };
+				const key = keyOf(t);
+				const byCat = key ? counts.get(key) : undefined;
+				if (!byCat) return { ...base, suggestion: null, note: "No approved history for this payee." };
+				let bestId = "";
+				let best = { name: "", n: 0 };
+				let total = 0;
+				for (const [id, row] of byCat) {
+					total += row.n;
+					if (row.n > best.n) [bestId, best] = [id, row];
+				}
+				return {
+					...base,
+					suggestion: {
+						category: best.name,
+						category_id: bestId,
+						basis: `${best.n} of ${total} past transactions`,
+						...(t.category_id && t.category_id !== bestId ? { differs_from_current: true } : {}),
+					},
+				};
+			});
+
+			return {
+				unapproved: pending.length,
+				returned: rows.length,
+				history_since: daysAgo(history_days),
+				transactions: rows,
+			};
+		}),
+	);
+
+	server.registerTool(
+		"get_budget_review",
+		{
+			title: "Budget review",
+			description:
+				"One-call check-in for this month: Ready to Assign, overspent categories, underfunded targets, unapproved and uncategorized transactions, and scheduled transactions due in the next days_ahead days. Use it for weekly reviews and scheduled check-ins.",
+			inputSchema: z.object({
+				plan_id: planId,
+				days_ahead: z.number().int().min(1).max(60).default(7).describe("How far ahead to list scheduled transactions"),
+			}),
+			annotations: READ,
+		},
+		wrap(async ({ plan_id, days_ahead }) => {
+			const plan = resolvePlan(plan_id);
+			const [m, accounts, unapproved, scheduled] = await Promise.all([
+				ynab.getMonth(plan, "current"),
+				ynab.listAccounts(plan),
+				ynab.listTransactions(plan, { type: "unapproved" }),
+				ynab.listScheduledTransactions(plan),
+			]);
+			const cats = m.categories.filter(
+				(c) => !c.deleted && !c.hidden && c.category_group_name !== "Internal Master Category",
+			);
+			const overspent = cats.filter((c) => c.balance < 0);
+			const underfunded = cats.filter((c) => (c.goal_under_funded ?? 0) > 0);
+			const pending = unapproved.filter((t) => !t.deleted);
+			const uncategorized = pending.filter(
+				(t) => !t.category_id && !t.transfer_account_id && !t.subtransactions?.some((x) => !x.deleted),
+			);
+
+			const today = todayUtc();
+			const until = addDays(today, days_ahead);
+			const upcoming = scheduled
+				.filter((s) => !s.deleted)
+				.flatMap((s) =>
+					occurrences(s, today, until).dates.map((date) => ({
+						date,
+						amount: money(s.amount),
+						payee: s.payee_name ?? null,
+						category: s.category_name ?? null,
+						account: s.account_name ?? s.account_id,
+						milliunits: s.amount,
+					})),
+				)
+				.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+			return {
+				month: m.month,
+				ready_to_assign: money(m.to_be_budgeted),
+				age_of_money_days: m.age_of_money ?? null,
+				overspent: overspent.map((c) => ({ category: categoryLabel(c), available: money(c.balance) })),
+				underfunded_targets: {
+					total_needed: money(underfunded.reduce((s, c) => s + (c.goal_under_funded ?? 0), 0)),
+					categories: underfunded.map((c) => ({
+						category: categoryLabel(c),
+						needed: money(c.goal_under_funded),
+						available: money(c.balance),
+					})),
+				},
+				unapproved: {
+					count: pending.length,
+					uncategorized: uncategorized.length,
+					oldest: pending.reduce<string | null>((o, t) => (!o || t.date < o ? t.date : o), null),
+				},
+				upcoming: {
+					through: until,
+					outflows: money(upcoming.filter((u) => u.milliunits < 0).reduce((s, u) => s + u.milliunits, 0)),
+					inflows: money(upcoming.filter((u) => u.milliunits > 0).reduce((s, u) => s + u.milliunits, 0)),
+					transactions: upcoming.map(({ milliunits: _m, ...u }) => u),
+				},
+				accounts: accounts
+					.filter((a) => !a.deleted && !a.closed && a.on_budget)
+					.map((a) => ({ name: a.name, type: a.type, balance: money(a.balance) })),
+			};
+		}),
+	);
+
+	server.registerTool(
+		"forecast_cash_flow",
+		{
+			title: "Forecast cash flow",
+			description:
+				"Project account balances forward from today using scheduled transactions, e.g. 'will Checking dip below $500 before payday?'. Starts from each account's current balance (including uncleared) and applies every scheduled occurrence, including transfers. Only scheduled transactions are counted, not everyday spending. By default covers checking, savings and cash accounts that have scheduled activity.",
+			inputSchema: z.object({
+				plan_id: planId,
+				days: z.number().int().min(1).max(365).default(30),
+				account: z.string().optional().describe("Only this account (name or ID)"),
+				low_balance: z.number().optional().describe("Flag the first date a balance drops below this, e.g. 500"),
+			}),
+			annotations: READ,
+		},
+		wrap(async ({ plan_id, days, account, low_balance }) => {
+			const plan = resolvePlan(plan_id);
+			const [accounts, scheduled] = await Promise.all([ynab.listAccounts(plan), ynab.listScheduledTransactions(plan)]);
+			const open = accounts.filter((a) => !a.deleted && !a.closed);
+			const nameOf = new Map(accounts.map((a) => [a.id, a.name]));
+			const today = todayUtc();
+			const end = addDays(today, days);
+
+			type Event = { date: string; amount: number; payee: string | null; category: string | null };
+			const events = new Map<string, Event[]>();
+			const push = (id: string, e: Event) => events.set(id, [...(events.get(id) ?? []), e]);
+			const approximate = new Set<string>();
+
+			for (const s of scheduled) {
+				if (s.deleted) continue;
+				const occ = occurrences(s, today, end);
+				if (occ.approximate && occ.dates.length) approximate.add(s.payee_name ?? s.id);
+				for (const date of occ.dates) {
+					push(s.account_id, { date, amount: s.amount, payee: s.payee_name ?? null, category: s.category_name ?? null });
+					if (s.transfer_account_id) {
+						push(s.transfer_account_id, {
+							date,
+							amount: -s.amount,
+							payee: `Transfer from ${nameOf.get(s.account_id) ?? "another account"}`,
+							category: null,
+						});
+					}
+				}
+			}
+
+			let selected: YnabAccount[];
+			if (account) {
+				selected = [await new Lookup(ynab, plan).account(account)];
+			} else {
+				selected = open.filter(
+					(a) => a.on_budget && ["checking", "savings", "cash"].includes(a.type) && events.has(a.id),
+				);
+				if (!selected.length) selected = open.filter((a) => events.has(a.id));
+			}
+
+			return {
+				from: today,
+				through: end,
+				note: "Only scheduled transactions are projected; everyday spending isn't.",
+				...(approximate.size
+					? {
+							approximate_schedules: [...approximate],
+							approximate_note:
+								"Twice-a-month schedules whose two days couldn't be read from YNAB; dates assume 15 days apart.",
+						}
+					: {}),
+				accounts: selected.map((a) => {
+					let running = a.balance;
+					let lowest = { balance: running, date: today };
+					const threshold = low_balance !== undefined ? toMilliunits(low_balance) : undefined;
+					let firstBelow: string | null = threshold !== undefined && running < threshold ? today : null;
+					const rows = (events.get(a.id) ?? [])
+						.sort((x, y) => (x.date < y.date ? -1 : x.date > y.date ? 1 : 0))
+						.map((e) => {
+							running += e.amount;
+							if (running < lowest.balance) lowest = { balance: running, date: e.date };
+							if (threshold !== undefined && !firstBelow && running < threshold) firstBelow = e.date;
+							return { ...e, amount: money(e.amount), balance_after: money(running) };
+						});
+					return {
+						account: a.name,
+						type: a.type,
+						starting_balance: money(a.balance),
+						ending_balance: money(running),
+						lowest: { balance: money(lowest.balance), date: lowest.date },
+						...(threshold !== undefined ? { first_below_low_balance: firstBelow } : {}),
+						events: rows.slice(0, 150),
+						...(rows.length > 150 ? { events_truncated: rows.length } : {}),
+					};
+				}),
 			};
 		}),
 	);
