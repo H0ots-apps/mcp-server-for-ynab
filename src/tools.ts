@@ -894,7 +894,7 @@ function registerCategoryTools(server: McpServer, ynab: YnabClient) {
 		{
 			title: "Set a category target",
 			description:
-				"Create, change or remove a category's target (YNAB's goals). Pass only what should change. Setting an amount on a category with no target creates a monthly target. frequency makes a repeating target and replaces the existing one; by_date sets when the amount is needed; mode picks 'set aside' (full amount every period) or 'refill' (top up to the amount). YNAB's API can't create 'have a balance of' targets, and credit card payment and loan categories don't support frequency, by_date or mode.",
+				"Create, change or remove a category's target (YNAB's goals). Pass only what should change. Setting an amount on a category with no target creates a monthly target. frequency makes a repeating target and replaces the existing one; by_date sets when the amount is needed; pass both for a dated target that repeats, e.g. a yearly bill (frequency yearly + by_date); mode picks 'set aside' (full amount every period) or 'refill' (top up to the amount). YNAB's API can't create 'have a balance of' targets, and credit card payment and loan categories don't support frequency, by_date or mode.",
 			inputSchema: z.object({
 				plan_id: planId,
 				category: z.string().describe("Category name or ID"),
@@ -902,7 +902,7 @@ function registerCategoryTools(server: McpServer, ynab: YnabClient) {
 				frequency: z
 					.enum(["monthly", "weekly", "yearly"])
 					.optional()
-					.describe("Repeat the target at this frequency. Requires amount; can't be combined with by_date."),
+					.describe("Repeat the target at this frequency. Requires amount. With by_date, the due date repeats at this frequency."),
 				by_date: isoDate
 					.nullable()
 					.optional()
@@ -931,9 +931,6 @@ function registerCategoryTools(server: McpServer, ynab: YnabClient) {
 				if (args.frequency && args.amount === undefined) {
 					throw new ToolInputError("frequency needs an amount as well.");
 				}
-				if (args.frequency && args.by_date) {
-					throw new ToolInputError("Use frequency or by_date, not both.");
-				}
 				if (!cat.goal_type && args.amount === undefined) {
 					throw new ToolInputError(`"${cat.name}" has no target yet, so pass an amount to create one.`);
 				}
@@ -944,7 +941,16 @@ function registerCategoryTools(server: McpServer, ynab: YnabClient) {
 				if (args.mode) write.goal_needs_whole_amount = args.mode === "set_aside";
 			}
 
-			const updated = await ynab.updateCategory(plan, cat.id, write);
+			let updated;
+			if (args.frequency && args.by_date) {
+				// YNAB rejects goal_frequency with goal_target_date in one request, but a later update
+				// that omits goal_frequency keeps the cadence. So set the repeating target first, then the date.
+				const { goal_target_date, ...first } = write;
+				await ynab.updateCategory(plan, cat.id, first);
+				updated = await ynab.updateCategory(plan, cat.id, { goal_target_date });
+			} else {
+				updated = await ynab.updateCategory(plan, cat.id, write);
+			}
 			return {
 				...(args.remove ? { removed_target: true } : {}),
 				previous_target: cat.goal_type ? simplifyCategory(cat).goal : null,
