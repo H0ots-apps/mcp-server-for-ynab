@@ -200,6 +200,22 @@ function simplifyTransaction(t: YnabTransaction) {
 	};
 }
 
+/**
+ * Human-readable repeat interval for a target, from YNAB's goal_cadence fields.
+ * Cadence 0, 1, 2 and 13 (none, monthly, weekly, yearly) are multiplied by goal_cadence_frequency;
+ * 3-12 mean every 2-11 months and 14 means every 2 years, with frequency ignored.
+ */
+function repeatLabel(cadence: number, frequency: number): string {
+	const every = (n: number, unit: string) => (n === 1 ? `every ${unit}` : `every ${n} ${unit}s`);
+	if (cadence === 0) return "never";
+	if (cadence === 1) return every(frequency, "month");
+	if (cadence === 2) return every(frequency, "week");
+	if (cadence === 13) return every(frequency, "year");
+	if (cadence >= 3 && cadence <= 12) return every(cadence - 1, "month");
+	if (cadence === 14) return every(2, "year");
+	return `unknown (cadence ${cadence})`;
+}
+
 function simplifyCategory(c: YnabCategory & { group?: string }) {
 	return {
 		id: c.id,
@@ -220,6 +236,9 @@ function simplifyCategory(c: YnabCategory & { group?: string }) {
 							: {}),
 						...(typeof c.goal_needs_whole_amount === "boolean"
 							? { mode: c.goal_needs_whole_amount ? "set_aside" : "refill" }
+							: {}),
+						...(typeof c.goal_cadence === "number"
+							? { repeats: repeatLabel(c.goal_cadence, c.goal_cadence_frequency ?? 1) }
 							: {}),
 					},
 				}
