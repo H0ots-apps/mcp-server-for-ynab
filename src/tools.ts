@@ -1621,18 +1621,28 @@ function registerPlanningTools(server: McpServer, ynab: YnabClient, store?: Budg
 			{
 				title: "Save a plan note",
 				description:
-					"Save a budget plan note under a topic, e.g. Rules, Goals, Priorities or Progress. mode 'replace' overwrites the topic; 'append' adds to the end, which suits dated progress entries. Agree the wording with the user before changing Rules or Goals.",
+					"Save a budget plan note under a topic, e.g. Rules, Goals, Priorities or Progress. mode 'replace' overwrites the topic; 'append' adds to the end, which suits dated progress entries; 'upsert' saves one line keyed by match_prefix, replacing the line that starts with it or appending if none does, so re-running a weekly review updates that week's entry instead of adding another. Agree the wording with the user before changing Rules or Goals.",
 				inputSchema: z.object({
 					topic: z.string().trim().min(1).max(80),
 					text: z.string().min(1).max(MAX_NOTE_CHARS),
-					mode: z.enum(["replace", "append"]).default("replace"),
+					mode: z.enum(["replace", "append", "upsert"]).default("replace"),
+					match_prefix: z
+						.string()
+						.min(3)
+						.max(80)
+						.optional()
+						.describe("For mode 'upsert': the start of the line to replace, e.g. '- 2026-W46'. text must start with it."),
 				}),
 				annotations: WRITE,
 			},
-			wrap(async ({ topic, text, mode }) => {
+			wrap(async ({ topic, text, mode, match_prefix }) => {
 				try {
-					const { note, previous } = await store.saveNote(topic, text, mode);
-					return { saved: note, ...(previous && mode === "replace" ? { previous_text: previous.text } : {}) };
+					const { note, previous, replaced } = await store.saveNote(topic, text, mode, match_prefix);
+					return {
+						saved: note,
+						...(previous && mode === "replace" ? { previous_text: previous.text } : {}),
+						...(mode === "upsert" ? { replaced_lines: replaced } : {}),
+					};
 				} catch (error) {
 					throw new ToolInputError(error instanceof Error ? error.message : String(error));
 				}

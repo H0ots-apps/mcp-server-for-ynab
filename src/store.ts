@@ -122,11 +122,32 @@ export class BudgetStore {
 		return raw ? (JSON.parse(raw) as PlanNote) : null;
 	}
 
-	async saveNote(topic: string, text: string, mode: "replace" | "append") {
+	/**
+	 * mode "upsert" keys a one-line entry by `matchPrefix`: the first line of the note that
+	 * starts with it is replaced (later duplicates are removed), or the entry is appended
+	 * when no line matches. Repeated saves for the same key leave one line.
+	 */
+	async saveNote(topic: string, text: string, mode: "replace" | "append" | "upsert", matchPrefix?: string) {
 		const key = slug(topic);
 		if (!key) throw new Error("The topic needs at least one letter or number.");
 		const previous = await this.getNote(topic);
-		const newText = mode === "append" && previous ? `${previous.text}\n\n${text}` : text;
+		let newText = mode === "append" && previous ? `${previous.text}\n\n${text}` : text;
+		const replaced: string[] = [];
+		if (mode === "upsert") {
+			if (!matchPrefix) throw new Error('mode "upsert" needs match_prefix.');
+			if (text.includes("\n")) throw new Error('mode "upsert" saves a single line; remove the line breaks.');
+			if (!text.startsWith(matchPrefix)) {
+				throw new Error(`The text must start with match_prefix ("${matchPrefix}") so the next save finds it.`);
+			}
+			const lines = previous ? previous.text.split("\n") : [];
+			const out: string[] = [];
+			for (const line of lines) {
+				if (!line.startsWith(matchPrefix)) out.push(line);
+				else if (replaced.push(line) === 1) out.push(text);
+			}
+			if (!replaced.length) newText = previous ? `${previous.text}\n\n${text}` : text;
+			else newText = replaced.length > 1 ? out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() : out.join("\n");
+		}
 		if (newText.length > MAX_NOTE_CHARS) {
 			throw new Error(
 				`That would make "${topic}" ${newText.length} characters; the limit is ${MAX_NOTE_CHARS}. Trim it or split it into another topic.`,
@@ -134,7 +155,7 @@ export class BudgetStore {
 		}
 		const note: PlanNote = { topic: previous?.topic ?? topic.trim(), text: newText, updated_at: new Date().toISOString() };
 		await this.kv.put(`${PLAN_PREFIX}${key}`, JSON.stringify(note));
-		return { note, previous };
+		return { note, previous, replaced };
 	}
 
 	async deleteNote(topic: string) {
